@@ -13,7 +13,7 @@ An absolute filesystem path on the machine running the MCP server, used as the s
 _Avoid_: Relative path, base64 body, content string, remote URL
 
 **Attachment upsert**:
-Uploading a file whose filename already exists on the target page creates a new attachment version rather than failing or creating a duplicate title.
+Uploading a file whose filename already exists on the target container creates a new attachment version rather than failing or creating a duplicate title.
 _Avoid_: Create-only upload, separate update tool, force-overwrite without versioning
 
 **Client attachment size limit**:
