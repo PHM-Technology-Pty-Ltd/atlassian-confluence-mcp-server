@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { ConfluenceClient } from './confluence-client';
 
 // Mock fetch globally
@@ -1560,6 +1563,186 @@ describe('ConfluenceClient', () => {
           body: expect.stringContaining('"name":"admin"'),
         })
       );
+    });
+  });
+
+  describe('uploadAttachment', () => {
+    let tempDir: string;
+    let tempFilePath: string;
+
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'confluence-upload-'));
+      tempFilePath = path.join(tempDir, 'diagram.png');
+      fs.writeFileSync(tempFilePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('should upload a file to a page with multipart form and nocheck header', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            results: [
+              {
+                id: 'att1',
+                status: 'current',
+                title: 'diagram.png',
+                extensions: { mediaType: 'image/png', fileSize: 4 },
+                _links: { webui: '/pages/viewpage.action?pageId=123', download: '/download/attachments/123/diagram.png' },
+              },
+            ],
+          }),
+      });
+
+      const client = new ConfluenceClient({
+        baseUrl: 'https://confluence.example.com',
+        pat: 'test-token',
+      });
+
+      const result = await client.uploadAttachment({
+        contentId: '123',
+        filePath: tempFilePath,
+        comment: 'generated diagram',
+        minorEdit: true,
+      });
+
+      expect(result).toEqual({
+        id: 'att1',
+        status: 'current',
+        title: 'diagram.png',
+        mediaType: 'image/png',
+        fileSize: 4,
+        webuiLink: '/pages/viewpage.action?pageId=123',
+        downloadLink: '/download/attachments/123/diagram.png',
+      });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://confluence.example.com/rest/api/content/123/child/attachment',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            Authorization: 'Bearer test-token',
+            'X-Atlassian-Token': 'nocheck',
+            Accept: 'application/json',
+          }),
+        })
+      );
+
+      const fetchOptions = mockFetch.mock.calls[0][1] as RequestInit;
+      expect(fetchOptions.headers).not.toHaveProperty('Content-Type');
+      expect(fetchOptions.body).toBeInstanceOf(FormData);
+
+      const form = fetchOptions.body as FormData;
+      const filePart = form.get('file');
+      expect(filePart).toBeInstanceOf(Blob);
+      expect(form.get('comment')).toBe('generated diagram');
+      expect(form.get('minorEdit')).toBe('true');
+    });
+
+    it('should use /wiki prefix and filename override for Cloud', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            results: [
+              {
+                id: 'att2',
+                status: 'current',
+                title: 'renamed.svg',
+                metadata: { mediaType: 'image/svg+xml' },
+                extensions: { fileSize: 4 },
+                _links: { webui: '/wiki/pages/viewpage.action?pageId=99', download: '/wiki/download/attachments/99/renamed.svg' },
+              },
+            ],
+          }),
+      });
+
+      const client = new ConfluenceClient({
+        baseUrl: 'https://mycompany.atlassian.net',
+        pat: 'api-token',
+        username: 'user@example.com',
+      });
+
+      const result = await client.uploadAttachment({
+        contentId: '99',
+        filePath: tempFilePath,
+        filename: 'renamed.svg',
+      });
+
+      expect(result.title).toBe('renamed.svg');
+      expect(result.mediaType).toBe('image/svg+xml');
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://mycompany.atlassian.net/wiki/rest/api/content/99/child/attachment',
+        expect.any(Object)
+      );
+    });
+
+    it('should reject relative file paths', async () => {
+      const client = new ConfluenceClient({
+        baseUrl: 'https://confluence.example.com',
+        pat: 'test-token',
+      });
+
+      await expect(
+        client.uploadAttachment({
+          contentId: '123',
+          filePath: 'relative/diagram.png',
+        })
+      ).rejects.toThrow('filePath must be an absolute path');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should reject paths containing parent segments', async () => {
+      const client = new ConfluenceClient({
+        baseUrl: 'https://confluence.example.com',
+        pat: 'test-token',
+      });
+
+      // Build without path.join so ".." remains a literal segment (join normalizes it away).
+      const traversalPath = `${tempDir}${path.sep}..${path.sep}${path.basename(tempDir)}${path.sep}diagram.png`;
+      await expect(
+        client.uploadAttachment({
+          contentId: '123',
+          filePath: traversalPath,
+        })
+      ).rejects.toThrow('filePath must not contain ".." path segments');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should reject files larger than the configured client limit', async () => {
+      const client = new ConfluenceClient({
+        baseUrl: 'https://confluence.example.com',
+        pat: 'test-token',
+        maxAttachmentBytes: 2,
+      });
+
+      await expect(
+        client.uploadAttachment({
+          contentId: '123',
+          filePath: tempFilePath,
+        })
+      ).rejects.toThrow('File exceeds client attachment size limit of 2 bytes');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should reject non-file paths', async () => {
+      const client = new ConfluenceClient({
+        baseUrl: 'https://confluence.example.com',
+        pat: 'test-token',
+      });
+
+      await expect(
+        client.uploadAttachment({
+          contentId: '123',
+          filePath: tempDir,
+        })
+      ).rejects.toThrow('filePath must point to a regular file');
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 });

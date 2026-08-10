@@ -1,7 +1,34 @@
 // Using native fetch (Node.js 18+) - no external dependencies needed
+import * as fs from 'fs';
+import * as path from 'path';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_LIMIT = 100;
+const DEFAULT_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+
+const EXTENSION_MEDIA_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.pdf': 'application/pdf',
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.csv': 'text/csv',
+  '.json': 'application/json',
+  '.xml': 'application/xml',
+  '.html': 'text/html',
+  '.htm': 'text/html',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.zip': 'application/zip',
+};
 
 export interface ConfluenceConfig {
   baseUrl: string;
@@ -11,6 +38,15 @@ export interface ConfluenceConfig {
   isCloud?: boolean;
   timeoutMs?: number;
   allowInsecureHttp?: boolean;
+  maxAttachmentBytes?: number;
+}
+
+export interface UploadAttachmentOptions {
+  contentId: string;
+  filePath: string;
+  filename?: string;
+  comment?: string;
+  minorEdit?: boolean;
 }
 
 export interface Space {
@@ -131,6 +167,7 @@ export class ConfluenceClient {
   private password?: string;
   private isCloud: boolean;
   private timeoutMs: number;
+  private maxAttachmentBytes: number;
 
   constructor(config: ConfluenceConfig) {
     const allowInsecureHttp = Boolean(config.allowInsecureHttp);
@@ -147,6 +184,7 @@ export class ConfluenceClient {
       hostname === 'atlassian.net' || hostname.endsWith('.atlassian.net');
     this.isCloud = config.isCloud ?? isAtlassianCloudHost;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.maxAttachmentBytes = ConfluenceClient.resolveMaxAttachmentBytes(config.maxAttachmentBytes);
   }
 
   private validateBaseUrl(url: string, allowInsecureHttp: boolean): void {
@@ -322,10 +360,63 @@ export class ConfluenceClient {
     return Math.max(1, Math.min(Number(limit) || 25, MAX_LIMIT));
   }
 
-  private getHeaders(): Record<string, string> {
+  private static resolveMaxAttachmentBytes(maxAttachmentBytes?: number): number {
+    if (maxAttachmentBytes === undefined || maxAttachmentBytes === null) {
+      return DEFAULT_MAX_ATTACHMENT_BYTES;
+    }
+    return ConfluenceClient.toPositiveInteger(maxAttachmentBytes, 'maxAttachmentBytes');
+  }
+
+  private static mediaTypeForFilename(filename: string): string {
+    const extension = path.extname(filename).toLowerCase();
+    return EXTENSION_MEDIA_TYPES[extension] ?? 'application/octet-stream';
+  }
+
+  private static hasParentSegment(filePath: string): boolean {
+    return filePath.split(/[/\\]/).includes('..');
+  }
+
+  private static resolveHostFilePath(filePath: string): string {
+    const trimmed = ConfluenceClient.sanitizeParam(filePath, 'filePath');
+    if (!path.isAbsolute(trimmed)) {
+      throw new Error('filePath must be an absolute path');
+    }
+    if (ConfluenceClient.hasParentSegment(trimmed)) {
+      throw new Error('filePath must not contain ".." path segments');
+    }
+
+    const normalized = path.normalize(trimmed);
+    if (ConfluenceClient.hasParentSegment(normalized)) {
+      throw new Error('filePath must not contain ".." path segments');
+    }
+    if (!path.isAbsolute(normalized)) {
+      throw new Error('filePath must be an absolute path');
+    }
+
+    return normalized;
+  }
+
+  private static mapAttachment(raw: any): Attachment {
+    const mediaType =
+      (typeof raw?.extensions?.mediaType === 'string' && raw.extensions.mediaType) ||
+      (typeof raw?.metadata?.mediaType === 'string' && raw.metadata.mediaType) ||
+      'application/octet-stream';
+    const fileSize = Number(raw?.extensions?.fileSize ?? raw?.extensions?.fileSizeInBytes ?? 0);
+
+    return {
+      id: String(raw?.id ?? ''),
+      status: typeof raw?.status === 'string' ? raw.status : 'current',
+      title: typeof raw?.title === 'string' ? raw.title : '',
+      mediaType,
+      fileSize: Number.isFinite(fileSize) ? fileSize : 0,
+      webuiLink: typeof raw?._links?.webui === 'string' ? raw._links.webui : '',
+      downloadLink: typeof raw?._links?.download === 'string' ? raw._links.download : '',
+    };
+  }
+
+  private getAuthHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
+      Accept: 'application/json',
     };
 
     if (this.pat) {
@@ -344,6 +435,13 @@ export class ConfluenceClient {
     }
 
     return headers;
+  }
+
+  private getHeaders(): Record<string, string> {
+    return {
+      ...this.getAuthHeaders(),
+      'Content-Type': 'application/json',
+    };
   }
 
   private getApiPrefix(): string {
@@ -880,6 +978,113 @@ export class ConfluenceClient {
     return this.request<{ results: Attachment[] }>(
       `${prefix}/rest/api/content/${encodeURIComponent(id)}/child/attachment`
     );
+  }
+
+  async uploadAttachment(options: UploadAttachmentOptions): Promise<Attachment> {
+    const contentId = ConfluenceClient.sanitizeParam(options.contentId, 'contentId');
+    const resolvedPath = ConfluenceClient.resolveHostFilePath(options.filePath);
+
+    let stats: fs.Stats;
+    try {
+      stats = fs.statSync(resolvedPath);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+      throw new Error(`filePath is not readable: ${message}`);
+    }
+
+    if (!stats.isFile()) {
+      throw new Error('filePath must point to a regular file');
+    }
+
+    if (stats.size > this.maxAttachmentBytes) {
+      throw new Error(
+        `File exceeds client attachment size limit of ${this.maxAttachmentBytes} bytes (file is ${stats.size} bytes). Increase CONFLUENCE_MAX_ATTACHMENT_BYTES if your Confluence instance allows larger uploads.`
+      );
+    }
+
+    const filename = options.filename
+      ? ConfluenceClient.sanitizeParam(options.filename, 'filename')
+      : path.basename(resolvedPath);
+
+    if (!filename || filename === '.' || filename === '..' || /[/\\]/.test(filename)) {
+      throw new Error('filename must be a non-empty basename without path separators');
+    }
+
+    const mediaType = ConfluenceClient.mediaTypeForFilename(filename);
+    const fileBuffer = fs.readFileSync(resolvedPath);
+    const form = new FormData();
+    form.append(
+      'file',
+      new Blob([Uint8Array.from(fileBuffer)], { type: mediaType }),
+      filename
+    );
+
+    if (options.comment !== undefined && options.comment !== null) {
+      form.append('comment', ConfluenceClient.requireString(options.comment, 'comment'));
+    }
+    if (options.minorEdit === true) {
+      form.append('minorEdit', 'true');
+    }
+
+    const prefix = this.getApiPrefix();
+    const response = await this.requestMultipart<{ results?: any[] } | any>(
+      `${prefix}/rest/api/content/${encodeURIComponent(contentId)}/child/attachment`,
+      form
+    );
+
+    const rawAttachment = Array.isArray(response?.results)
+      ? response.results[0]
+      : Array.isArray(response)
+        ? response[0]
+        : response;
+
+    if (!rawAttachment || typeof rawAttachment !== 'object') {
+      throw new Error('Confluence API returned no attachment in upload response');
+    }
+
+    return ConfluenceClient.mapAttachment(rawAttachment);
+  }
+
+  private async requestMultipart<T>(endpoint: string, form: FormData): Promise<T> {
+    const url = `${this.baseUrl}${endpoint}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const headers = {
+        ...this.getAuthHeaders(),
+        // Required by Confluence to accept multipart attachment uploads
+        'X-Atlassian-Token': 'nocheck',
+      };
+
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: form,
+          signal: controller.signal,
+        });
+      } catch (error: unknown) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw new Error(`Request timed out after ${this.timeoutMs}ms: POST ${endpoint}`);
+        }
+        throw error;
+      }
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(this.sanitizeErrorMessage(response, errorText));
+      }
+
+      if (response.status === 204) {
+        return {} as T;
+      }
+
+      return response.json() as Promise<T>;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   // ==================== COMMENTS ====================
