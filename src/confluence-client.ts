@@ -1,6 +1,7 @@
 // Using native fetch (Node.js 18+) - no external dependencies needed
 import * as fs from 'fs';
 import * as path from 'path';
+import type { BlobPart } from 'node:buffer';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_LIMIT = 100;
@@ -1011,11 +1012,18 @@ export class ConfluenceClient {
     }
 
     const mediaType = ConfluenceClient.mediaTypeForFilename(filename);
-    const fileBuffer = fs.readFileSync(resolvedPath);
+    let fileBuffer: Buffer;
+    try {
+      fileBuffer = fs.readFileSync(resolvedPath);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+      throw new Error(`filePath is not readable: ${message}`);
+    }
     const form = new FormData();
+    // Buffer is a valid BlobPart at runtime; cast avoids a full-byte copy (Uint8Array.from).
     form.append(
       'file',
-      new Blob([Uint8Array.from(fileBuffer)], { type: mediaType }),
+      new Blob([fileBuffer as BlobPart], { type: mediaType }),
       filename
     );
 
