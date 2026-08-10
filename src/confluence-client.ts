@@ -1027,10 +1027,12 @@ export class ConfluenceClient {
     }
 
     const prefix = this.getApiPrefix();
-    const response = await this.requestMultipart<{ results?: any[] } | any>(
-      `${prefix}/rest/api/content/${encodeURIComponent(contentId)}/child/attachment`,
-      form
-    );
+    const existing = await this.findAttachmentByFilename(contentId, filename);
+    const endpoint = existing
+      ? `${prefix}/rest/api/content/${encodeURIComponent(contentId)}/child/attachment/${encodeURIComponent(existing.id)}/data`
+      : `${prefix}/rest/api/content/${encodeURIComponent(contentId)}/child/attachment`;
+
+    const response = await this.requestMultipart<{ results?: any[] } | any>(endpoint, form);
 
     const rawAttachment = Array.isArray(response?.results)
       ? response.results[0]
@@ -1043,6 +1045,23 @@ export class ConfluenceClient {
     }
 
     return ConfluenceClient.mapAttachment(rawAttachment);
+  }
+
+  private async findAttachmentByFilename(
+    contentId: string,
+    filename: string
+  ): Promise<{ id: string } | null> {
+    const prefix = this.getApiPrefix();
+    const response = await this.request<{ results?: any[] }>(
+      `${prefix}/rest/api/content/${encodeURIComponent(contentId)}/child/attachment?filename=${encodeURIComponent(filename)}&limit=1`
+    );
+
+    const match = Array.isArray(response?.results) ? response.results[0] : undefined;
+    if (!match?.id) {
+      return null;
+    }
+
+    return { id: String(match.id) };
   }
 
   private async requestMultipart<T>(endpoint: string, form: FormData): Promise<T> {

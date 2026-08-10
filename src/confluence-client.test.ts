@@ -1581,22 +1581,28 @@ describe('ConfluenceClient', () => {
     });
 
     it('should upload a file to a page with multipart form and nocheck header', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: () =>
-          Promise.resolve({
-            results: [
-              {
-                id: 'att1',
-                status: 'current',
-                title: 'diagram.png',
-                extensions: { mediaType: 'image/png', fileSize: 4 },
-                _links: { webui: '/pages/viewpage.action?pageId=123', download: '/download/attachments/123/diagram.png' },
-              },
-            ],
-          }),
-      });
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ results: [] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              results: [
+                {
+                  id: 'att1',
+                  status: 'current',
+                  title: 'diagram.png',
+                  extensions: { mediaType: 'image/png', fileSize: 4 },
+                  _links: { webui: '/pages/viewpage.action?pageId=123', download: '/download/attachments/123/diagram.png' },
+                },
+              ],
+            }),
+        });
 
       const client = new ConfluenceClient({
         baseUrl: 'https://confluence.example.com',
@@ -1620,7 +1626,13 @@ describe('ConfluenceClient', () => {
         downloadLink: '/download/attachments/123/diagram.png',
       });
 
-      expect(mockFetch).toHaveBeenCalledWith(
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        1,
+        'https://confluence.example.com/rest/api/content/123/child/attachment?filename=diagram.png&limit=1',
+        expect.any(Object)
+      );
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        2,
         'https://confluence.example.com/rest/api/content/123/child/attachment',
         expect.objectContaining({
           method: 'POST',
@@ -1632,7 +1644,7 @@ describe('ConfluenceClient', () => {
         })
       );
 
-      const fetchOptions = mockFetch.mock.calls[0][1] as RequestInit;
+      const fetchOptions = mockFetch.mock.calls[1][1] as RequestInit;
       expect(fetchOptions.headers).not.toHaveProperty('Content-Type');
       expect(fetchOptions.body).toBeInstanceOf(FormData);
 
@@ -1643,24 +1655,76 @@ describe('ConfluenceClient', () => {
       expect(form.get('minorEdit')).toBe('true');
     });
 
-    it('should use /wiki prefix and filename override for Cloud', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: () =>
-          Promise.resolve({
-            results: [
-              {
-                id: 'att2',
-                status: 'current',
-                title: 'renamed.svg',
-                metadata: { mediaType: 'image/svg+xml' },
-                extensions: { fileSize: 4 },
-                _links: { webui: '/wiki/pages/viewpage.action?pageId=99', download: '/wiki/download/attachments/99/renamed.svg' },
+    it('should update existing attachment data when filename already exists', async () => {
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              results: [{ id: 'att-existing', title: 'diagram.png' }],
+            }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              id: 'att-existing',
+              status: 'current',
+              title: 'diagram.png',
+              extensions: { mediaType: 'image/png', fileSize: 4 },
+              _links: {
+                webui: '/pages/viewpage.action?pageId=123',
+                download: '/download/attachments/123/diagram.png?version=2',
               },
-            ],
-          }),
+            }),
+        });
+
+      const client = new ConfluenceClient({
+        baseUrl: 'https://confluence.example.com',
+        pat: 'test-token',
       });
+
+      const result = await client.uploadAttachment({
+        contentId: '123',
+        filePath: tempFilePath,
+        comment: 'updated diagram',
+      });
+
+      expect(result.id).toBe('att-existing');
+      expect(result.downloadLink).toContain('version=2');
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        2,
+        'https://confluence.example.com/rest/api/content/123/child/attachment/att-existing/data',
+        expect.objectContaining({ method: 'POST' })
+      );
+    });
+
+    it('should use /wiki prefix and filename override for Cloud', async () => {
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ results: [] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              results: [
+                {
+                  id: 'att2',
+                  status: 'current',
+                  title: 'renamed.svg',
+                  metadata: { mediaType: 'image/svg+xml' },
+                  extensions: { fileSize: 4 },
+                  _links: { webui: '/wiki/pages/viewpage.action?pageId=99', download: '/wiki/download/attachments/99/renamed.svg' },
+                },
+              ],
+            }),
+        });
 
       const client = new ConfluenceClient({
         baseUrl: 'https://mycompany.atlassian.net',
@@ -1676,7 +1740,13 @@ describe('ConfluenceClient', () => {
 
       expect(result.title).toBe('renamed.svg');
       expect(result.mediaType).toBe('image/svg+xml');
-      expect(mockFetch).toHaveBeenCalledWith(
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        1,
+        'https://mycompany.atlassian.net/wiki/rest/api/content/99/child/attachment?filename=renamed.svg&limit=1',
+        expect.any(Object)
+      );
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        2,
         'https://mycompany.atlassian.net/wiki/rest/api/content/99/child/attachment',
         expect.any(Object)
       );
