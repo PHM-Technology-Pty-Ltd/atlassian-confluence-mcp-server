@@ -246,6 +246,90 @@ CONFLUENCE_ALLOWED_SPACES=ENG,SECURITY
 }
 ```
 
+### Server / Data Center with Basic Auth (Windows)
+
+Do not paste your password into `mcp.json`. Use one of the options below, in order of preference. Replace the example host, vault, and paths with your own.
+
+#### Option 1 (recommended): 1Password CLI
+
+`op run` keeps the password out of `mcp.json`. The file stores an `op://` reference, and 1Password resolves it into the child process only for the life of that process, so the plaintext secret is not written to disk ([Load secrets into the environment](https://developer.1password.com/docs/cli/secrets-environment-variables/)). You approve that lookup with Windows Hello (fingerprint or face) instead of typing your 1Password password ([desktop app integration](https://developer.1password.com/docs/cli/app-integration/)).
+
+1. Install the CLI: `winget install AgileBits.1Password.CLI`
+2. In the 1Password desktop app, enable **Settings > Developer > Integrate with 1Password CLI** (unlocks via Windows Hello).
+3. Save your Confluence login as a 1Password item, then right-click the password field and choose **Copy Secret Reference** (for example `op://Employee/Confluence/password`).
+4. Configure the MCP client:
+
+```json
+{
+  "mcpServers": {
+    "confluence-server": {
+      "command": "op",
+      "args": ["run", "--", "npx", "-y", "atlassian-confluence-mcp-server"],
+      "env": {
+        "CONFLUENCE_BASE_URL": "https://confluence.example.com",
+        "CONFLUENCE_USERNAME": "your-username",
+        "CONFLUENCE_PASSWORD": "op://Employee/Confluence/password",
+        "CONFLUENCE_READ_ONLY": "false",
+        "CONFLUENCE_UPLOAD_ALLOWED_DIRS": "C:\\Users\\you\\ConfluenceUploads"
+      }
+    }
+  }
+}
+```
+
+To run a local build instead of the npm package (for example to pick up unreleased fixes), build once with `npm install && npm run build`, then point `op run` at `node` and the built entry point. Re-run `npm run build` after pulling changes.
+
+```json
+{
+  "mcpServers": {
+    "confluence-server": {
+      "command": "op",
+      "args": [
+        "run", "--", "node",
+        "C:\\path\\to\\atlassian-confluence-mcp-server\\dist\\index.js"
+      ],
+      "env": {
+        "CONFLUENCE_BASE_URL": "https://confluence.example.com",
+        "CONFLUENCE_USERNAME": "op://Employee/Confluence/username",
+        "CONFLUENCE_PASSWORD": "op://Employee/Confluence/password",
+        "CONFLUENCE_READ_ONLY": "false",
+        "CONFLUENCE_UPLOAD_ALLOWED_DIRS": "C:\\Users\\you\\ConfluenceUploads"
+      }
+    }
+  }
+}
+```
+
+#### Option 2 (fallback): Windows user environment variable
+
+Stored in plain text in your user registry hive (`HKCU\Environment`), so it is weaker than 1Password, but still keeps the secret out of `mcp.json`. Set it from PowerShell without echoing it or leaving it in history:
+
+```powershell
+$p = (New-Object System.Net.NetworkCredential('', (Read-Host 'Confluence password' -AsSecureString))).Password
+[Environment]::SetEnvironmentVariable('CONFLUENCE_PASSWORD', $p, 'User')
+Remove-Variable p
+```
+
+Fully restart your MCP client (for example Cursor) so it picks up the new variable, then reference it with `${env:...}` interpolation (supported by Cursor):
+
+```json
+{
+  "mcpServers": {
+    "confluence-server": {
+      "command": "npx",
+      "args": ["-y", "atlassian-confluence-mcp-server"],
+      "env": {
+        "CONFLUENCE_BASE_URL": "https://confluence.example.com",
+        "CONFLUENCE_USERNAME": "your-username",
+        "CONFLUENCE_PASSWORD": "${env:CONFLUENCE_PASSWORD}",
+        "CONFLUENCE_READ_ONLY": "false",
+        "CONFLUENCE_UPLOAD_ALLOWED_DIRS": "C:\\Users\\you\\ConfluenceUploads"
+      }
+    }
+  }
+}
+```
+
 ## Available Tools (47)
 
 Note: tool exposure depends on security configuration. With the default `CONFLUENCE_READ_ONLY=true`, mutating tools are intentionally hidden/blocked.

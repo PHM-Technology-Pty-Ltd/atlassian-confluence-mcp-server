@@ -11,7 +11,7 @@ import {
 import * as dotenv from 'dotenv';
 import { ConfluenceClient } from './confluence-client.js';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const CONFLUENCE_BASE_URL = process.env.CONFLUENCE_BASE_URL;
 const PAT = process.env.PAT;
